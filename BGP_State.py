@@ -6,33 +6,30 @@
 #instal python 3.8 or ++
 # pip3 install telebot
 # pip3 install librouteros
-# file CheckMessage = 0
-# echo 0 > CheckSend.txt
 # */10    *       *       *       *    python3 /Mikrotik_BGP_State/BGP_State.py
 import sys
 import os
 from librouteros import  connect
 from telebot import TeleBot
+#sql
+import sqlite3
+con = sqlite3.connect('db.db')
+cur = con.cursor()
 
-#import time
 from datetime import datetime
 t = datetime.now().strftime("%m/%d/%Y, %H:%M")
-#from datetime import timedelta
 #Mikrotik
-USERNAME = ''
-PASSWORD = ''
-PORT = ''
+USERNAME = 'admin'
+PASSWORD = 'admin'
+PORT = '8291'
 #Bot
 app = TeleBot(__name__)
 if __name__ == '__main__':
     #bot_token
-    app.config['api_key'] = ''
+    app.config['api_key'] = 'Your_Token'
     #chat_id
-    chat_id = ''
+    chat_id = 'Your_Chat_id'
     #app.poll(debug=True)
-
-
-
 
 
 DEBUG = False
@@ -44,67 +41,70 @@ def log(log_msg):
 
 def main():
 
-    Dict1 = {}
-    Dict2 = {}
-    Flag = 1
+    Dict1 = []
     Count = 0
-    Result = ''
     
-    
-
     #router loopback IP to be checked from a file
     #file should have only router loopback IP perline nothing else
 
+
     try:
-        RouterID = [line.rstrip('\n') \
-        for line in open('RouterID.txt')]
+        RouterID = [ row for row in cur.execute('SELECT id, router_id FROM routers')]
     except Exception:
         e = sys.exc_info()[0]
         log(e)
         sys.exit(1)
 
+
     ## Defining the API Connection
-    for x in RouterID: 
+    for x in RouterID:
         try:
-            api = connect(username=USERNAME, password=PASSWORD, host=x, port=PORT)
+            api = connect(username=USERNAME, password=PASSWORD, host=x[1], port=PORT)
+            
             ## Command run on each router
             bgp_peers = api(cmd='/routing/bgp/peer/print')
             for i in bgp_peers:
                 if str(i['disabled']) == 'False':
-                    Dict1.update({i['remote-address']: {'router_id': x, 'state': i['state']}} )
+                    Dict1.append({'id':x[0], 'neighbor': i['remote-address'],'name': i['name'], 'router_id': x[1], 'state': i['state']} )   
             api.close()
 
+
         except Exception:
             e = sys.exc_info()[0]
             log(e)
 
-    #Current State Message
-    def current_state():
-        try:
-            CheckMessage = [r_line.rstrip('\n') \
-            for r_line in open('CheckSend.txt')]
-            return int(CheckMessage[0])
-        except Exception:
-            e = sys.exc_info()[0]
-            log(e)
-            sys.exit(1)        
     
+    # Finding Number of Down Peers && Update Database.
+    for state in Dict1:
+        if state['state'] != "established":
+            cur.execute('''INSERT OR IGNORE INTO bgp_sessions (session_id, name, neighbor, up, down) 
+            VALUES (?, ?, ?, ?, ?)''', (state['id'],state['name'],state['neighbor'], 0, 1))
+            con.commit()
+         
+   
+
+    # Send Message If And Update Database
+    for status  in cur.execute('''SELECT r.router_id, b.up, b.down, b.telegram_status, b.name, b.neighbor, b.session_id
+    FROM routers r LEFT JOIN bgp_sessions b on b.session_id = r.id'''):
+        if status[2] and not status[3]:
+            Count += 1
+            app.send_message(chat_id, f"{Count} peer_down:\n neighbor {status[4]} {status[5]} of router {status[0]} is down!\n time: {t}\n")
+            cur.execute("UPDATE bgp_sessions SET telegram_status=? WHERE session_id=?",(1, status[6]))
+            con.commit()
+           
+            
     
-    #Finding Number of Down Peers.
-    for Key, Value  in Dict1.items():
-       if Dict1[Key]['state'] != "established":
-          Dict2.update({Key: Value})
-          Flag = 0
-          Count += 1
-    if Flag == 0 and current_state() == 0:
-        for Key, Value in Dict2.items():
-            Result = f"{Count} peer_down:\n neighbor {Key} of router {Value['router_id']} is down!\n time: {t}\n"
-            app.send_message(chat_id, Result)
-        cmd = r'echo 1 > CheckSend.txt'
-        os.system(cmd)
-    else:
-        cmd = r'echo 0 > CheckSend.txt'
-        os.system(cmd)
+    # Dict1 = [] # Debag
+    if not Dict1:
+
+       for message in cur.execute('''SELECT b.name, b.neighbor, r.router_id 
+       FROM routers r 
+       LEFT JOIN bgp_sessions b on b.session_id = r.id '''):
+           m =  f"{Count} peer_down:\n neighbor {message[0]} {message[1]} of router {message[2]} is up!\n time: {t}\n"
+           app.send_message(chat_id, m)
+         
+       cur.execute("UPDATE bgp_sessions SET up=?, down=?, telegram_status=? WHERE down=?",(1,0,0,1))
+       con.commit()
 
 main()
 
